@@ -1,5 +1,7 @@
-export default async function handler(req, res) {
-  // 1. CORS 보안 설정
+const https = require('https');
+
+export default function handler(req, res) {
+  // 1. CORS 보안 허용 설정
   res.setHeader('Access-Control-Allow-Credentials', true);
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS');
@@ -14,69 +16,75 @@ export default async function handler(req, res) {
   }
 
   const { sigunguCd, bjdongCd, bun, ji } = req.query;
+  // ★ 환경변수 키가 없으면 에러 메시지 출력
   const apiKey = process.env.GOV_API_KEY; 
-
-  // 2. 주소 확인 (건축HUB 신규 API)
-  // platGbCd=0 (대지) 파라미터 필수 명시
-  const url = `https://apis.data.go.kr/1613000/BldRgstHubService/getBrTitleInfo?serviceKey=${apiKey}&sigunguCd=${sigunguCd}&bjdongCd=${bjdongCd}&bun=${bun}&ji=${ji}&platGbCd=0&numOfRows=1&_type=json`;
-
-  try {
-    const response = await fetch(url);
-    const text = await response.text(); // 무조건 텍스트로 먼저 받음
-
-    // 3. [진단] 정부 서버가 에러(XML)를 보냈는지 확인
-    if (text.trim().startsWith('<')) {
-        console.error("정부 서버 XML 에러:", text);
-        
-        // 키 문제인지 확인
-        if (text.includes('SERVICE_KEY_IS_NOT_REGISTERED')) {
-            return res.status(200).json({ error: "키 승인 대기중 (SERVICE_KEY_IS_NOT_REGISTERED)" });
-        }
-        if (text.includes('LIMITED_NUMBER_OF_SERVICE_REQUESTS')) {
-            return res.status(200).json({ error: "일일 트래픽 초과" });
-        }
-        
-        // 그 외 XML 에러 내용을 그대로 보여줌
-        return res.status(200).json({ error: "정부 서버 에러(XML)", details: text });
-    }
-
-    // 4. JSON 파싱 시도
-    let data;
-    try {
-        data = JSON.parse(text);
-    } catch (e) {
-        return res.status(200).json({ error: "JSON 변환 실패", details: text.substring(0, 100) });
-    }
-
-    // 5. 정상 데이터 처리
-    const item = data.response?.body?.items?.item;
-    if (!item) {
-      return res.status(200).json({ message: "데이터 없음", violation: "N" });
-    }
-
-    const info = Array.isArray(item) ? item[0] : item;
-
-    // 주차대수 합산
-    const parking = 
-      (parseInt(info.indrAutoUtcnt) || 0) + 
-      (parseInt(info.indrMechUtcnt) || 0) + 
-      (parseInt(info.oudrAutoUtcnt) || 0) + 
-      (parseInt(info.oudrMechUtcnt) || 0);
-
-    const result = {
-      location: info.platPlc || "-",
-      bunji: `${info.bun}-${info.ji}`,
-      roadAddr: info.newPlatPlc || "정보없음",
-      name: info.bldNm || "명칭없음",
-      purpose: info.mainPurpsCdNm || "-", 
-      parking: parking,
-      violation: info.vnbrYn || "정보없음",
-      structure: info.strctCdNm || "-"
-    };
-
-    return res.status(200).json(result);
-
-  } catch (error) {
-    return res.status(200).json({ error: "Vercel 내부 오류", details: error.message });
+  if (!apiKey) {
+      return res.status(200).json({ error: "환경변수(GOV_API_KEY)가 설정되지 않았습니다." });
   }
+
+  // 2. 건축HUB 신규 API 주소 (OpenAPI 가이드 참고)
+  [cite_start]// [cite: 92] 요청 주소: https://apis.data.go.kr/1613000/BldRgstHubService/getBrTitleInfo
+  const apiUrl = `https://apis.data.go.kr/1613000/BldRgstHubService/getBrTitleInfo?serviceKey=${apiKey}&sigunguCd=${sigunguCd}&bjdongCd=${bjdongCd}&bun=${bun}&ji=${ji}&platGbCd=0&numOfRows=1&_type=json`;
+
+  // 3. https 모듈을 사용하여 데이터 요청 (fetch 대신 사용)
+  https.get(apiUrl, (apiRes) => {
+    let data = '';
+
+    // 데이터 조각 모으기
+    apiRes.on('data', (chunk) => {
+      data += chunk;
+    });
+
+    // 수신 완료 시 처리
+    apiRes.on('end', () => {
+      try {
+        // A. 정부 서버 에러(XML) 체크
+        if (data.trim().startsWith('<')) {
+            console.error("XML Error:", data);
+            if (data.includes('SERVICE_KEY_IS_NOT_REGISTERED')) {
+                return res.status(200).json({ message: "키 승인 대기중" });
+            }
+            return res.status(200).json({ error: "정부 서버 에러(XML)", details: data });
+        }
+
+        // B. JSON 변환
+        const jsonResult = JSON.parse(data);
+        const item = jsonResult.response?.body?.items?.item;
+
+        if (!item) {
+          return res.status(200).json({ message: "데이터 없음", violation: "N" });
+        }
+
+        const info = Array.isArray(item) ? item[0] : item;
+
+        // C. 데이터 추출 (건축HUB 명세서 기준)
+        [cite_start]// [cite: 94] 주차대수 합산 (옥내/옥외 + 기계/자주)
+        const parking = 
+          (parseInt(info.indrAutoUtcnt) || 0) + 
+          (parseInt(info.indrMechUtcnt) || 0) + 
+          (parseInt(info.oudrAutoUtcnt) || 0) + 
+          (parseInt(info.oudrMechUtcnt) || 0);
+
+        const result = {
+          location: info.platPlc || [cite_start]"-",              // [cite: 93] 대지위치
+          [cite_start]bunji: `${info.bun}-${info.ji}`,            // [cite: 93] 지번
+          roadAddr: info.newPlatPlc || [cite_start]"정보없음",     // [cite: 93] 도로명대지위치
+          name: info.bldNm || [cite_start]"명칭없음",             // [cite: 93] 건물명
+          purpose: info.mainPurpsCdNm || [cite_start]"-",         // [cite: 98] 주용도코드명
+          parking: parking,
+          violation: info.vnbrYn || "정보없음",       // (명세서 미포함 항목 대비 안전처리)
+          structure: info.strctCdNm || [cite_start]"-"            // [cite: 98] 구조코드명
+        };
+
+        return res.status(200).json(result);
+
+      } catch (e) {
+        return res.status(200).json({ error: "데이터 처리 중 오류", details: e.message });
+      }
+    });
+
+  }).on('error', (e) => {
+    // 네트워크 연결 실패 등
+    return res.status(200).json({ error: "Vercel 네트워크 오류", details: e.message });
+  });
 }
