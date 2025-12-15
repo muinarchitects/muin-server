@@ -1,6 +1,7 @@
 const https = require('https');
 
-export default function handler(req, res) {
+// [수정됨] 호환성이 가장 좋은 CommonJS 방식으로 변경
+module.exports = async (req, res) => {
   // 1. CORS 보안 허용 설정
   res.setHeader('Access-Control-Allow-Credentials', true);
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -10,40 +11,46 @@ export default function handler(req, res) {
     'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version'
   );
 
+  // Preflight 요청 처리
   if (req.method === 'OPTIONS') {
     res.status(200).end();
     return;
   }
 
+  // 2. 파라미터 및 키 확인
   const { sigunguCd, bjdongCd, bun, ji } = req.query;
-  // ★ 환경변수 키가 없으면 에러 메시지 출력
   const apiKey = process.env.GOV_API_KEY; 
+
   if (!apiKey) {
       return res.status(200).json({ error: "환경변수(GOV_API_KEY)가 설정되지 않았습니다." });
   }
 
-  // 2. 건축HUB 신규 API 주소 (OpenAPI 가이드 참고)
-  [cite_start]// [cite: 92] 요청 주소: https://apis.data.go.kr/1613000/BldRgstHubService/getBrTitleInfo
+  // 3. 건축HUB 신규 API 주소
+  [cite_start]// [참고] 제공해주신 가이드 문서에 따라 https 프로토콜 사용 [cite: 81]
   const apiUrl = `https://apis.data.go.kr/1613000/BldRgstHubService/getBrTitleInfo?serviceKey=${apiKey}&sigunguCd=${sigunguCd}&bjdongCd=${bjdongCd}&bun=${bun}&ji=${ji}&platGbCd=0&numOfRows=1&_type=json`;
 
-  // 3. https 모듈을 사용하여 데이터 요청 (fetch 대신 사용)
-  https.get(apiUrl, (apiRes) => {
+  // 4. 데이터 요청 (https 모듈 사용)
+  const request = https.get(apiUrl, (apiRes) => {
     let data = '';
 
-    // 데이터 조각 모으기
     apiRes.on('data', (chunk) => {
       data += chunk;
     });
 
-    // 수신 완료 시 처리
     apiRes.on('end', () => {
       try {
         // A. 정부 서버 에러(XML) 체크
         if (data.trim().startsWith('<')) {
             console.error("XML Error:", data);
+            
+            // 키 관련 에러 메시지 체크
             if (data.includes('SERVICE_KEY_IS_NOT_REGISTERED')) {
                 return res.status(200).json({ message: "키 승인 대기중" });
             }
+            if (data.includes('LIMITED_NUMBER_OF_SERVICE_REQUESTS')) {
+                return res.status(200).json({ error: "트래픽 초과" });
+            }
+            
             return res.status(200).json({ error: "정부 서버 에러(XML)", details: data });
         }
 
@@ -57,23 +64,23 @@ export default function handler(req, res) {
 
         const info = Array.isArray(item) ? item[0] : item;
 
-        // C. 데이터 추출 (건축HUB 명세서 기준)
-        [cite_start]// [cite: 94] 주차대수 합산 (옥내/옥외 + 기계/자주)
+        [cite_start]// C. 주차대수 합산 (가이드 문서 필드명 기준) [cite: 85]
         const parking = 
           (parseInt(info.indrAutoUtcnt) || 0) + 
           (parseInt(info.indrMechUtcnt) || 0) + 
           (parseInt(info.oudrAutoUtcnt) || 0) + 
           (parseInt(info.oudrMechUtcnt) || 0);
 
+        // D. 결과 정리
         const result = {
-          location: info.platPlc || [cite_start]"-",              // [cite: 93] 대지위치
-          [cite_start]bunji: `${info.bun}-${info.ji}`,            // [cite: 93] 지번
-          roadAddr: info.newPlatPlc || [cite_start]"정보없음",     // [cite: 93] 도로명대지위치
-          name: info.bldNm || [cite_start]"명칭없음",             // [cite: 93] 건물명
-          purpose: info.mainPurpsCdNm || [cite_start]"-",         // [cite: 98] 주용도코드명
+          location: info.platPlc || "-",
+          bunji: `${info.bun}-${info.ji}`,
+          roadAddr: info.newPlatPlc || "정보없음",
+          name: info.bldNm || "명칭없음",
+          purpose: info.mainPurpsCdNm || "-",
           parking: parking,
-          violation: info.vnbrYn || "정보없음",       // (명세서 미포함 항목 대비 안전처리)
-          structure: info.strctCdNm || [cite_start]"-"            // [cite: 98] 구조코드명
+          violation: info.vnbrYn || "정보없음", // 신규 API는 위반 여부 필드가 없을 수 있음
+          structure: info.strctCdNm || "-"
         };
 
         return res.status(200).json(result);
@@ -82,9 +89,9 @@ export default function handler(req, res) {
         return res.status(200).json({ error: "데이터 처리 중 오류", details: e.message });
       }
     });
+  });
 
-  }).on('error', (e) => {
-    // 네트워크 연결 실패 등
+  request.on('error', (e) => {
     return res.status(200).json({ error: "Vercel 네트워크 오류", details: e.message });
   });
-}
+};
