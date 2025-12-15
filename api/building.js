@@ -1,5 +1,5 @@
 export default async function handler(req, res) {
-  // 1. CORS 보안 허용 설정
+  // 1. CORS 보안 설정 (아임웹 접속 허용)
   res.setHeader('Access-Control-Allow-Credentials', true);
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS');
@@ -13,60 +13,68 @@ export default async function handler(req, res) {
     return;
   }
 
-  // 2. 요청 파라미터 받기
   const { sigunguCd, bjdongCd, bun, ji } = req.query;
   const apiKey = process.env.GOV_API_KEY; 
 
-  // 3. [수정됨] 건축HUB 신규 API 주소 적용 (BldRgstHubService)
-  const url = `http://apis.data.go.kr/1613000/BldRgstHubService/getBrTitleInfo?serviceKey=${apiKey}&sigunguCd=${sigunguCd}&bjdongCd=${bjdongCd}&bun=${bun}&ji=${ji}&numOfRows=1&_type=json`;
+  // 2. 건축HUB 신규 API 주소 (HTTPS 적용 및 대지구분코드 추가)
+  // 문서 예시를 참고하여 platGbCd=0 (대지)을 명시적으로 추가함 
+  const url = `https://apis.data.go.kr/1613000/BldRgstHubService/getBrTitleInfo?serviceKey=${apiKey}&sigunguCd=${sigunguCd}&bjdongCd=${bjdongCd}&bun=${bun}&ji=${ji}&platGbCd=0&numOfRows=1&_type=json`;
 
   try {
     const response = await fetch(url);
     
-    // API 키 에러 등 체크
-    if (!response.ok) {
-        throw new Error(`정부 서버 응답 오류: ${response.status}`);
+    // 3. [중요] 무조건 텍스트로 먼저 받아서 내용을 확인합니다. (에러 방지용)
+    const text = await response.text();
+    
+    // 만약 정부 서버가 에러(XML)를 보냈다면, 내용에 '<' 괄호가 포함되어 있을 것입니다.
+    if (text.trim().startsWith('<')) {
+        console.error("정부 서버 에러 응답:", text);
+        // 에러 내용을 분석해서 프론트엔드로 보냅니다.
+        if (text.includes('SERVICE_KEY_IS_NOT_REGISTERED')) {
+            return res.status(200).json({ message: "키 승인 대기중", error: "SERVICE_KEY_IS_NOT_REGISTERED" });
+        }
+        return res.status(500).json({ error: "정부 API 에러(XML)", details: text });
     }
 
-    const data = await response.json();
+    // JSON 변환 시도
+    let data;
+    try {
+        data = JSON.parse(text);
+    } catch (e) {
+        return res.status(500).json({ error: "JSON 파싱 실패", details: text });
+    }
+
+    // 정상 데이터 처리
     const item = data.response?.body?.items?.item;
 
-    // 데이터가 없는 경우
     if (!item) {
       return res.status(200).json({ message: "데이터 없음", violation: "N" });
     }
 
-    // 결과가 배열이면 첫 번째 데이터 사용
     const info = Array.isArray(item) ? item[0] : item;
 
-    // 4. [수정됨] 신규 API 명세서 기반 주차대수 합산 로직
-    // 명세서 상 옥내/옥외/자주/기계 주차대수 필드 합산
+    // 주차대수 합산
     const parking = 
       (parseInt(info.indrAutoUtcnt) || 0) + 
       (parseInt(info.indrMechUtcnt) || 0) + 
       (parseInt(info.oudrAutoUtcnt) || 0) + 
       (parseInt(info.oudrMechUtcnt) || 0);
 
-    // 5. [수정됨] 7가지 항목 데이터 매핑
     const result = {
-      location: info.platPlc || "-",                 // 1. 대지위치
-      bunji: `${info.bun}-${info.ji}`,               // 2. 지번
-      roadAddr: info.newPlatPlc || "정보없음",        // 3. 도로명주소
-      name: info.bldNm || "명칭없음",                // 4-1. 건물명
-      purpose: info.mainPurpsCdNm || "-",            // 4-2. 주용도 (명세서 항목명: mainPurpsCdNm)
-      parking: parking,                              // 5. 주차대수 (합산값)
-      
-      // 주의: 건축HUB 표제부 API 명세서에는 '위반여부(vnbrYn)' 필드가 명시되어 있지 않습니다.
-      // 구버전과 달리 데이터가 없을 수 있으므로, 없으면 '정보없음'으로 처리합니다.
-      violation: info.vnbrYn || "확인불가",           // 6. 위반여부
-      
-      structure: info.strctCdNm || "-"               // 7. 구조 (명세서 항목명: strctCdNm)
+      location: info.platPlc || "-",
+      bunji: `${info.bun}-${info.ji}`,
+      roadAddr: info.newPlatPlc || "정보없음",
+      name: info.bldNm || "명칭없음",
+      purpose: info.mainPurpsCdNm || "-", // 문서에 따른 필드명 [cite: 97]
+      parking: parking,
+      violation: info.vnbrYn || "확인불가", // 신규 API 위반여부 필드 확인 필요
+      structure: info.strctCdNm || "-"    // 문서에 따른 필드명 [cite: 98]
     };
 
     return res.status(200).json(result);
 
   } catch (error) {
-    console.error("API Error:", error);
-    return res.status(500).json({ error: "서버 연결 실패", details: error.message });
+    console.error("Vercel Server Error:", error);
+    return res.status(500).json({ error: "서버 내부 오류", details: error.message });
   }
 }
