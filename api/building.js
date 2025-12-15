@@ -1,43 +1,67 @@
-// 이 코드는 아임웹과 정부 서버 사이를 연결해줍니다.
 export default async function handler(req, res) {
-  // 1. 아임웹에서 보낸 주소 정보 받기
-  const { sigunguCd, bjdongCd, bun, ji } = req.query;
+  // CORS 보안 허용 설정 (아임웹 연동 필수)
+  res.setHeader('Access-Control-Allow-Credentials', true);
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS');
+  res.setHeader(
+    'Access-Control-Allow-Headers',
+    'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version'
+  );
 
-  // 2. 공공데이터포털 API 주소 (건축물대장 표제부)
-  const apiKey = process.env.GOV_API_KEY; // 설정에서 넣을 키
+  // Preflight 요청 처리
+  if (req.method === 'OPTIONS') {
+    res.status(200).end();
+    return;
+  }
+
+  const { sigunguCd, bjdongCd, bun, ji } = req.query;
+  const apiKey = process.env.GOV_API_KEY; // Vercel 환경변수에 저장된 키
+
+  // 국토교통부 건축물대장 표제부 조회 API 호출
   const url = `http://apis.data.go.kr/1613000/BldRgstService_v2/getBrTitleInfo?serviceKey=${apiKey}&sigunguCd=${sigunguCd}&bjdongCd=${bjdongCd}&bun=${bun}&ji=${ji}&numOfRows=1&_type=json`;
 
   try {
-    // 3. 정부 서버에 데이터 요청 (fetch 사용)
     const response = await fetch(url);
-    const data = await response.json();
-
-    // 4. 결과 확인 및 정리
-    const item = data.response?.body?.items?.item;
-
-    if (!item) {
-      return res.status(200).json({ 
-        message: "데이터 없음", 
-        violation: "정보없음" 
-      });
+    
+    // 응답 상태 확인
+    if (!response.ok) {
+        throw new Error(`API 호출 오류: ${response.status}`);
     }
 
-    // 결과가 리스트(배열)로 올 경우 첫 번째 것만 사용, 아니면 객체 그대로 사용
-    const buildingInfo = Array.isArray(item) ? item[0] : item;
+    const data = await response.json();
+    const item = data.response?.body?.items?.item;
 
-    // 5. 아임웹으로 보낼 최종 데이터
+    // 데이터가 없는 경우 (아직 등재되지 않은 건물 등)
+    if (!item) {
+      return res.status(200).json({ message: "데이터 없음", violation: "N" });
+    }
+
+    // 결과가 배열로 올 경우 첫 번째 데이터 사용
+    const info = Array.isArray(item) ? item[0] : item;
+
+    // 5. 주차대수 합산 계산
+    const parking = 
+      (parseInt(info.indrAutoUtcnt) || 0) + // 옥내 자주
+      (parseInt(info.indrMechUtcnt) || 0) + // 옥내 기계
+      (parseInt(info.oudrAutoUtcnt) || 0) + // 옥외 자주
+      (parseInt(info.oudrMechUtcnt) || 0);  // 옥외 기계
+
+    // 최종 추출 데이터 (요청하신 7가지 항목)
     const result = {
-      name: buildingInfo.bldNm || "이름 없는 건물",
-      mainPurps: buildingInfo.mainPurpsNm || "용도 미기재",
-      violation: buildingInfo.vnbrYn || "N", // 위반 여부 (Y/N)
-      area: buildingInfo.totArea || "0"
+      location: info.platPlc || "-",                 // 1. 대지위치
+      bunji: `${info.bun}-${info.ji}`,               // 2. 지번
+      roadAddr: info.newPlatPlc || "도로명주소 없음", // 3. 도로명주소
+      name: info.bldNm || "명칭없음",                // 4. 건물명
+      purpose: info.mainPurpsNm || "-",              // 4. 주용도 (건축물 현황)
+      parking: parking,                              // 5. 주차대수
+      violation: info.vnbrYn || "N",                 // 6. 위반여부
+      structure: info.strctCdNm || "-"               // 7. 건축물 구조 현황
     };
 
-    // 성공 응답 전송
     return res.status(200).json(result);
 
   } catch (error) {
-    // 에러 발생 시
-    return res.status(500).json({ error: "정부 서버 연결 실패", details: error.message });
+    console.error(error);
+    return res.status(500).json({ error: "서버 연결 실패", details: error.message });
   }
 }
