@@ -1,4 +1,8 @@
-export default async function handler(req, res) {
+// [호환성 모드] 최신 문법(import/fetch) 대신 표준 문법(require/https) 사용
+const https = require('https');
+const url = require('url');
+
+module.exports = async (req, res) => {
   // 1. CORS 보안 설정 (무조건 허용)
   res.setHeader('Access-Control-Allow-Credentials', true);
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -14,38 +18,45 @@ export default async function handler(req, res) {
     return;
   }
 
+  // 2. 파라미터 및 환경변수 확인
+  const { sigunguCd, bjdongCd, bun, ji } = req.query;
+  const apiKey = process.env.GOV_API_KEY;
+
+  if (!apiKey) {
+    return res.status(200).json({ error: "환경변수(GOV_API_KEY)가 설정되지 않았습니다." });
+  }
+
+  [cite_start]// 3. 건축HUB 신규 API 주소 생성 [cite: 17, 24]
+  // (https 모듈 사용을 위해 URL 객체 활용)
+  const apiUrl = `https://apis.data.go.kr/1613000/BldRgstHubService/getBrTitleInfo?serviceKey=${apiKey}&sigunguCd=${sigunguCd}&bjdongCd=${bjdongCd}&bun=${bun}&ji=${ji}&platGbCd=0&numOfRows=1&_type=json`;
+
   try {
-    // 2. 파라미터 및 환경변수 확인
-    const { sigunguCd, bjdongCd, bun, ji } = req.query;
-    const apiKey = process.env.GOV_API_KEY;
-
-    // 키가 없는 경우 처리
-    if (!apiKey) {
-      return res.status(200).json({ 
-        error: "Server Config Error", 
-        details: "Vercel 환경변수(GOV_API_KEY)가 설정되지 않았습니다." 
+    // 4. 데이터 요청 (fetch 대신 내장 https 모듈 사용)
+    const apiResponse = await new Promise((resolve, reject) => {
+      https.get(apiUrl, (resp) => {
+        let data = '';
+        
+        // 데이터 조각 받기
+        resp.on('data', (chunk) => {
+          data += chunk;
+        });
+        
+        // 수신 완료
+        resp.on('end', () => {
+          resolve(data);
+        });
+      }).on('error', (err) => {
+        reject(err);
       });
-    }
+    });
 
-    // 3. 건축HUB 신규 API 주소 (대지구분코드 platGbCd=0 필수)
-    // 주소: https://apis.data.go.kr/1613000/BldRgstHubService/getBrTitleInfo
-    const apiUrl = `https://apis.data.go.kr/1613000/BldRgstHubService/getBrTitleInfo?serviceKey=${apiKey}&sigunguCd=${sigunguCd}&bjdongCd=${bjdongCd}&bun=${bun}&ji=${ji}&platGbCd=0&numOfRows=1&_type=json`;
+    const text = apiResponse.toString();
 
-    // 4. 데이터 요청 (Node.js 내장 fetch 사용)
-    const response = await fetch(apiUrl);
-    
-    // 5. 텍스트로 먼저 받아서 에러인지(XML) 데이터인지(JSON) 확인
-    const text = await response.text();
-
-    // A. XML 에러 체크 (정부 서버가 에러를 보낸 경우)
+    // A. XML 에러 체크
     if (text.trim().startsWith('<')) {
-      console.error("Gov API XML Error:", text);
-      
+      console.error("Gov API Error:", text);
       if (text.includes('SERVICE_KEY_IS_NOT_REGISTERED')) {
         return res.status(200).json({ message: "키 승인 대기중" });
-      }
-      if (text.includes('LIMITED_NUMBER_OF_SERVICE_REQUESTS')) {
-        return res.status(200).json({ error: "트래픽 초과" });
       }
       return res.status(200).json({ error: "정부 서버 에러(XML)", details: text });
     }
@@ -54,21 +65,20 @@ export default async function handler(req, res) {
     let data;
     try {
       data = JSON.parse(text);
-    } catch (parseError) {
+    } catch (e) {
       return res.status(200).json({ error: "JSON 파싱 실패", details: text });
     }
 
-    // 6. 데이터 추출 및 가공
+    // 5. 데이터 가공
     const item = data.response?.body?.items?.item;
 
-    // 데이터가 없는 경우
     if (!item) {
       return res.status(200).json({ message: "데이터 없음", violation: "N" });
     }
 
     const info = Array.isArray(item) ? item[0] : item;
 
-    // 주차대수 합산
+    [cite_start]// 주차대수 합산 [cite: 21]
     const parking = 
       (parseInt(info.indrAutoUtcnt) || 0) + 
       (parseInt(info.indrMechUtcnt) || 0) + 
@@ -77,24 +87,20 @@ export default async function handler(req, res) {
 
     // 최종 결과 반환
     const result = {
-      location: info.platPlc || "-",              // 대지위치
-      bunji: `${info.bun}-${info.ji}`,            // 지번
-      roadAddr: info.newPlatPlc || "정보없음",     // 도로명주소
-      name: info.bldNm || "명칭없음",             // 건물명
-      purpose: info.mainPurpsCdNm || "-",         // 주용도
-      parking: parking,                           // 주차대수
-      violation: info.vnbrYn || "정보없음",       // 위반여부
-      structure: info.strctCdNm || "-"            // 구조
+      location: info.platPlc || "-",
+      bunji: `${info.bun}-${info.ji}`,
+      roadAddr: info.newPlatPlc || "정보없음",
+      name: info.bldNm || "명칭없음",
+      purpose: info.mainPurpsCdNm || "-",
+      parking: parking,
+      violation: info.vnbrYn || "정보없음",
+      structure: info.strctCdNm || "-"
     };
 
     return res.status(200).json(result);
 
   } catch (error) {
-    // 7. Vercel 서버 내부 에러 처리
-    console.error("Vercel Logic Error:", error);
-    return res.status(500).json({ 
-      error: "Vercel 내부 오류", 
-      details: error.message 
-    });
+    console.error("Server Error:", error);
+    return res.status(500).json({ error: "서버 내부 오류", details: error.message });
   }
-}
+};
